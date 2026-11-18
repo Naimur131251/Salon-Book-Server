@@ -25,6 +25,8 @@ const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("salon-book");
 const servicesCollection = database.collection("services");
 const appointmentsCollection = database.collection("appointments");
+const usersCollection = database.collection("user");
+const paymentsCollection = database.collection("payments");
 
 app.get("/", (req, res) => {
   res.send("salon book is open...");
@@ -101,6 +103,65 @@ app.get("/services/:id", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch service details",
+    });
+  }
+});
+
+// Admin Overview
+app.get("/admin/overview", async (req, res) => {
+  try {
+    const [
+      totalCustomers,
+      totalActiveServices,
+      totalAppointments,
+      pendingAppointments,
+      confirmedAppointments,
+      successfulPayments,
+    ] = await Promise.all([
+      usersCollection.countDocuments({ role: "customer" }),
+
+      servicesCollection.countDocuments({ status: "active" }),
+
+      appointmentsCollection.countDocuments({}),
+
+      appointmentsCollection.countDocuments({
+        status: "pending",
+      }),
+
+      appointmentsCollection.countDocuments({
+        status: "confirmed",
+      }),
+
+      paymentsCollection
+        .aggregate([
+          { $match: { status: "succeeded" } },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: "$amount" },
+            },
+          },
+        ])
+        .toArray(),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        totalCustomers,
+        totalActiveServices,
+        totalAppointments,
+        pendingAppointments,
+        confirmedAppointments,
+        totalSuccessfulPayments: successfulPayments[0]?.total || 0,
+      },
+    });
+  } catch (error) {
+    console.error("Admin overview error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch dashboard statistics",
     });
   }
 });
