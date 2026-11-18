@@ -22,9 +22,17 @@ export async function connectToMongoDB() {
 }
 
 const connectedClient = await connectToMongoDB();
+const database = connectedClient.db("salon-book");
+const services = database.collection("services");
 
 app.get("/", (req, res) => {
   res.send("salon book is open...");
+});
+
+app.get("/services", async (req, res) => {
+  const cursor = services.find({});
+  const result = await cursor.toArray();
+  res.send(result);
 });
 
 app.listen(port, () => {
