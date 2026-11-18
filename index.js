@@ -1411,6 +1411,68 @@ app.post("/appointments", async (req, res) => {
   }
 });
 
+app.get("/customer/appointments", async (req, res) => {
+  try {
+    const customerId = req.query.customerId;
+
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer ID is required",
+      });
+    }
+
+    if (!ObjectId.isValid(customerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid customer ID",
+      });
+    }
+
+    const result = await appointmentsCollection
+      .aggregate([
+        {
+          $match: {
+            customerId: customerId.toString(),
+          },
+        },
+        {
+          $lookup: {
+            from: "services",
+            localField: "serviceId",
+            foreignField: "_id",
+            as: "service",
+          },
+        },
+        {
+          $unwind: {
+            path: "$service",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $sort: {
+            createdAt: -1,
+          },
+        },
+      ])
+      .toArray();
+
+    return res.status(200).json({
+      success: true,
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Customer appointments error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointments",
+    });
+  }
+});
+
 const startServer = async () => {
   try {
     await createAppointmentIndexes();
