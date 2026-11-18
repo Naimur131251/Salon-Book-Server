@@ -27,6 +27,122 @@ const servicesCollection = database.collection("services");
 const appointmentsCollection = database.collection("appointments");
 const usersCollection = database.collection("user");
 const paymentsCollection = database.collection("payments");
+const transactionsCollection = database.collection("transactions");
+
+// Appointment Indexes
+const createAppointmentIndexes = async () => {
+  await appointmentsCollection.createIndex(
+    { activeSlotKey: 1 },
+    {
+      unique: true,
+      partialFilterExpression: {
+        activeSlotKey: { $exists: true },
+      },
+      name: "unique_active_appointment_slot",
+    },
+  );
+
+  await appointmentsCollection.createIndex({
+    customerId: 1,
+    createdAt: -1,
+  });
+
+  await appointmentsCollection.createIndex({
+    appointmentDate: 1,
+    status: 1,
+  });
+
+  console.log("Appointment indexes created successfully");
+};
+
+const TIME_SLOTS = [
+  "09:00 AM - 10:00 AM",
+  "10:00 AM - 11:00 AM",
+  "11:00 AM - 12:00 PM",
+  "12:00 PM - 01:00 PM",
+  "02:00 PM - 03:00 PM",
+  "03:00 PM - 04:00 PM",
+  "04:00 PM - 05:00 PM",
+  "05:00 PM - 06:00 PM",
+];
+
+// Bangladesh Current Date & Time
+const getDhakaDateTime = () => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Dhaka",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+
+  const values = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    hours: Number(values.hour),
+    minutes: Number(values.minute),
+  };
+};
+
+// Convert Time Slot into minutes
+const getSlotStartMinutes = (timeSlot) => {
+  const startTime = timeSlot.split(" - ")[0];
+  const [time, period] = startTime.split(" ");
+
+  let [hour, minute] = time.split(":").map(Number);
+
+  if (period === "PM" && hour !== 12) {
+    hour += 12;
+  }
+
+  if (period === "AM" && hour === 12) {
+    hour = 0;
+  }
+
+  return hour * 60 + minute;
+};
+
+// Validate Appointment Date & Time
+const validateAppointmentDateTime = (appointmentDate, timeSlot) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(appointmentDate)) {
+    return "Invalid appointment date";
+  }
+
+  const parsedDate = new Date(`${appointmentDate}T00:00:00.000Z`);
+
+  if (
+    Number.isNaN(parsedDate.getTime()) ||
+    parsedDate.toISOString().slice(0, 10) !== appointmentDate
+  ) {
+    return "Invalid appointment date";
+  }
+
+  if (!TIME_SLOTS.includes(timeSlot)) {
+    return "Invalid appointment time slot";
+  }
+
+  const { date: today, hours, minutes } = getDhakaDateTime();
+
+  if (appointmentDate < today) {
+    return "Please select an upcoming date";
+  }
+
+  if (appointmentDate === today) {
+    const currentMinutes = hours * 60 + minutes;
+    const slotMinutes = getSlotStartMinutes(timeSlot);
+
+    if (slotMinutes <= currentMinutes) {
+      return "This appointment time has already passed";
+    }
+  }
+
+  return null;
+};
 
 app.get("/", (req, res) => {
   res.send("salon book is open...");
@@ -477,8 +593,10 @@ app.get("/admin/appointments", async (req, res) => {
       .aggregate([
         {
           $lookup: {
-            from: "services",
-            let: { serviceId: "$serviceId" },
+            from: "user",
+            let: {
+              customerId: "$customerId",
+            },
             pipeline: [
               {
                 $match: {
@@ -487,7 +605,7 @@ app.get("/admin/appointments", async (req, res) => {
                       "$_id",
                       {
                         $convert: {
-                          input: "$$serviceId",
+                          input: "$$customerId",
                           to: "objectId",
                           onError: null,
                           onNull: null,
@@ -499,13 +617,14 @@ app.get("/admin/appointments", async (req, res) => {
               },
               {
                 $project: {
-                  serviceName: 1,
-                  category: 1,
+                  name: 1,
+                  email: 1,
                   image: 1,
+                  phone: 1,
                 },
               },
             ],
-            as: "service",
+            as: "customer",
           },
         },
         {
@@ -541,7 +660,9 @@ app.get("/admin/appointments", async (req, res) => {
           },
         },
         {
-          $sort: { createdAt: -1 },
+          $sort: {
+            createdAt: -1,
+          },
         },
       ])
       .toArray();
@@ -581,7 +702,7 @@ app.get("/admin/appointments/:id", async (req, res) => {
         },
         {
           $lookup: {
-            from: "users",
+            from: "user",
             let: { customerId: "$customerId" },
             pipeline: [
               {
@@ -716,17 +837,27 @@ app.patch("/admin/appointments/:id/status", async (req, res) => {
       });
     }
 
+    const updateQuery = {
+      $set: {
+        status,
+        updatedAt: new Date(),
+      },
+    };
+
+    if (status === "cancelled") {
+      updateQuery.$unset = {
+        activeSlotKey: "",
+      };
+
+      updateQuery.$set.cancelledAt = new Date();
+    }
+
     const result = await appointmentsCollection.updateOne(
       {
         _id: new ObjectId(id),
         status: appointment.status,
       },
-      {
-        $set: {
-          status,
-          updatedAt: new Date(),
-        },
-      },
+      updateQuery,
     );
 
     if (result.modifiedCount === 0) {
@@ -955,7 +1086,7 @@ app.get("/admin/transactions", async (req, res) => {
         },
         {
           $lookup: {
-            from: "users",
+            from: "user",
             let: { customerId: "$customerId" },
             pipeline: [
               {
@@ -1094,6 +1225,81 @@ app.patch("/profile", async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`salon book is running on port ${port}`);
+// Customer Overview
+app.get("/customer/overview", async (req, res) => {
+  try {
+    // Authentication middleware পরে যোগ করবে
+    const customerId = req.query.customerId;
+
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer ID is required",
+      });
+    }
+
+    const appointments = await appointmentsCollection
+      .find({
+        customerId,
+      })
+      .toArray();
+
+    const totalAppointments = appointments.length;
+
+    const pendingAppointments = appointments.filter(
+      (item) => item.status === "pending",
+    ).length;
+
+    const confirmedAppointments = appointments.filter(
+      (item) => item.status === "confirmed",
+    ).length;
+
+    const cancelledAppointments = appointments.filter(
+      (item) => item.status === "cancelled",
+    ).length;
+
+    const paidAppointments = appointments.filter(
+      (item) => item.paymentStatus === "paid",
+    ).length;
+
+    const recentAppointments = await appointmentsCollection
+      .find({ customerId })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        totalAppointments,
+        pendingAppointments,
+        confirmedAppointments,
+        cancelledAppointments,
+        paidAppointments,
+        recentAppointments,
+      },
+    });
+  } catch (error) {
+    console.error("Customer overview error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to load customer overview",
+    });
+  }
 });
+
+const startServer = async () => {
+  try {
+    await createAppointmentIndexes();
+
+    app.listen(port, () => {
+      console.log(`salon book is running on port ${port}`);
+    });
+  } catch (error) {
+    console.error("Server startup failed:", error);
+    process.exit(1);
+  }
+};
+
+startServer();
