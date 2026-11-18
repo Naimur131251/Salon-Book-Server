@@ -150,12 +150,15 @@ app.get("/", (req, res) => {
 
 app.get("/services", async (req, res) => {
   try {
-    const { search, category, sort } = req.query;
+    const { search, category, sort, featured } = req.query;
 
     const query = { status: "active" };
 
     if (search) {
-      query.serviceName = { $regex: search, $options: "i" };
+      query.serviceName = {
+        $regex: search,
+        $options: "i",
+      };
     }
 
     if (category && category !== "all") {
@@ -163,22 +166,29 @@ app.get("/services", async (req, res) => {
     }
 
     let sortOption = {};
-    if (sort === "low-to-high") sortOption = { price: 1 };
-    if (sort === "high-to-low") sortOption = { price: -1 };
 
-    const result = await servicesCollection
-      .find(query)
-      .sort(sortOption)
-      .toArray();
+    if (sort === "low-to-high") {
+      sortOption = { price: 1 };
+    } else if (sort === "high-to-low") {
+      sortOption = { price: -1 };
+    } else {
+      sortOption = { createdAt: -1 };
+    }
+
+    let servicesQuery = servicesCollection.find(query).sort(sortOption);
+
+    if (featured === "true") {
+      servicesQuery = servicesQuery.limit(6);
+    }
+
+    const result = await servicesQuery.toArray();
 
     res.status(200).json({
       success: true,
-      message: "Services fetched successfully",
       total: result.length,
       data: result,
     });
   } catch (error) {
-    console.error("Get services error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch services",
