@@ -166,6 +166,26 @@ app.get("/admin/overview", async (req, res) => {
   }
 });
 
+app.get("/admin/services", async (req, res) => {
+  try {
+    const result = await servicesCollection
+      .find({})
+      .sort({ _id: -1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch services",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
