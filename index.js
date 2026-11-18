@@ -746,6 +746,123 @@ app.patch("/admin/users/:id/status", async (req, res) => {
   }
 });
 
+app.get("/admin/transactions", async (req, res) => {
+  try {
+    const result = await transactionsCollection
+      .aggregate([
+        {
+          $lookup: {
+            from: "appointments",
+            let: { appointmentId: "$appointmentId" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: [
+                      { $toString: "$_id" },
+                      { $toString: "$$appointmentId" },
+                    ],
+                  },
+                },
+              },
+              {
+                $lookup: {
+                  from: "services",
+                  let: { serviceId: "$serviceId" },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: [
+                            { $toString: "$_id" },
+                            { $toString: "$$serviceId" },
+                          ],
+                        },
+                      },
+                    },
+                    {
+                      $project: {
+                        serviceName: 1,
+                        category: 1,
+                        image: 1,
+                        price: 1,
+                        duration: 1,
+                      },
+                    },
+                  ],
+                  as: "service",
+                },
+              },
+              {
+                $unwind: {
+                  path: "$service",
+                  preserveNullAndEmptyArrays: true,
+                },
+              },
+            ],
+            as: "appointment",
+          },
+        },
+        {
+          $unwind: {
+            path: "$appointment",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            let: { customerId: "$customerId" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: [{ $toString: "$_id" }, { $toString: "$$customerId" }],
+                  },
+                },
+              },
+              {
+                $project: {
+                  name: 1,
+                  email: 1,
+                  image: 1,
+                  phone: 1,
+                },
+              },
+            ],
+            as: "customer",
+          },
+        },
+        {
+          $unwind: {
+            path: "$customer",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $sort: {
+            createdAt: -1,
+          },
+        },
+      ])
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      message: "Transactions fetched successfully.",
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get transactions error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch transactions.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
