@@ -641,6 +641,56 @@ app.get("/admin/users", async (req, res) => {
   }
 });
 
+app.get("/admin/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user ID.",
+      });
+    }
+
+    const user = await usersCollection.findOne(
+      {
+        _id: new ObjectId(id),
+        role: "customer",
+      },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          phone: 1,
+          role: 1,
+          isBlocked: 1,
+          createdAt: 1,
+        },
+      },
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: user,
+    });
+  } catch (error) {
+    console.error("User details error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch customer details.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
