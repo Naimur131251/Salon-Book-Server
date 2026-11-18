@@ -241,6 +241,150 @@ app.post("/admin/services", async (req, res) => {
   }
 });
 
+app.get("/admin/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID.",
+      });
+    }
+
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: service,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch service.",
+    });
+  }
+});
+
+app.patch("/admin/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID.",
+      });
+    }
+
+    const {
+      serviceName,
+      category,
+      description,
+      price,
+      duration,
+      image,
+      status,
+    } = req.body;
+
+    const updateData = {};
+
+    if (serviceName !== undefined) {
+      if (!serviceName.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Service name is required.",
+        });
+      }
+      updateData.serviceName = serviceName.trim();
+    }
+
+    if (category !== undefined) updateData.category = category;
+    if (description !== undefined) updateData.description = description;
+
+    if (price !== undefined) {
+      const parsedPrice = Number(price);
+
+      if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price must be a positive number.",
+        });
+      }
+
+      updateData.price = parsedPrice;
+    }
+
+    if (duration !== undefined) {
+      const parsedDuration = Number(duration);
+
+      if (!Number.isInteger(parsedDuration) || parsedDuration <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Duration must be a positive number.",
+        });
+      }
+
+      updateData.duration = parsedDuration;
+    }
+
+    if (image !== undefined) updateData.image = image;
+
+    if (status !== undefined) {
+      if (!["active", "inactive"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid service status.",
+        });
+      }
+
+      updateData.status = status;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid fields provided for update.",
+      });
+    }
+
+    updateData.updatedAt = new Date();
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Service updated successfully.",
+    });
+  } catch (error) {
+    console.error("Update service error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update service.",
+    });
+  }
+});
+
 app.delete("/admin/services/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -859,6 +1003,93 @@ app.get("/admin/transactions", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch transactions.",
+    });
+  }
+});
+
+app.patch("/profile", async (req, res) => {
+  try {
+    const { name, image, phone } = req.body;
+
+    const updateData = {};
+
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Valid name is required.",
+        });
+      }
+      updateData.name = name.trim();
+    }
+
+    if (image !== undefined) {
+      if (typeof image !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid profile image.",
+        });
+      }
+      updateData.image = image.trim();
+    }
+
+    if (phone !== undefined) {
+      if (typeof phone !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid phone number.",
+        });
+      }
+      updateData.phone = phone.trim();
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No profile information provided.",
+      });
+    }
+
+    updateData.updatedAt = new Date();
+
+    // ডাটাবেজে থাকা admin ইউজারকে খুঁজে আপডেট করবে
+    const result = await usersCollection.updateOne(
+      { role: "admin" },
+      { $set: updateData },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin user not found.",
+      });
+    }
+
+    const updatedUser = await usersCollection.findOne(
+      { role: "admin" },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          phone: 1,
+          role: 1,
+          isBlocked: 1,
+        },
+      },
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully.",
+      data: updatedUser,
+    });
+  } catch (error) {
+    console.error("Profile update error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update profile.",
     });
   }
 });
