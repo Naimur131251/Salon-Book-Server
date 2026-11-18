@@ -327,6 +327,96 @@ app.patch("/admin/services/:id/status", async (req, res) => {
   }
 });
 
+app.get("/admin/appointments", async (req, res) => {
+  try {
+    const result = await appointmentsCollection
+      .aggregate([
+        {
+          $lookup: {
+            from: "services",
+            let: { serviceId: "$serviceId" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: [
+                      "$_id",
+                      {
+                        $convert: {
+                          input: "$$serviceId",
+                          to: "objectId",
+                          onError: null,
+                          onNull: null,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+              {
+                $project: {
+                  serviceName: 1,
+                  category: 1,
+                  image: 1,
+                },
+              },
+            ],
+            as: "service",
+          },
+        },
+        {
+          $lookup: {
+            from: "services",
+            localField: "serviceId",
+            foreignField: "_id",
+            as: "service",
+          },
+        },
+        {
+          $unwind: {
+            path: "$customer",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $unwind: {
+            path: "$service",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $addFields: {
+            customerId: "$customer",
+            serviceId: "$service",
+          },
+        },
+        {
+          $project: {
+            customer: 0,
+            service: 0,
+          },
+        },
+        {
+          $sort: { createdAt: -1 },
+        },
+      ])
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get appointments error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointments.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
