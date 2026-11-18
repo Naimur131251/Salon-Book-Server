@@ -606,6 +606,41 @@ app.patch("/admin/appointments/:id/status", async (req, res) => {
   }
 });
 
+app.get("/admin/users", async (req, res) => {
+  try {
+    const result = await usersCollection
+      .find(
+        { role: "customer" },
+        {
+          projection: {
+            name: 1,
+            email: 1,
+            image: 1,
+            phone: 1,
+            role: 1,
+            isBlocked: 1,
+            createdAt: 1,
+          },
+        },
+      )
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get users error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch customers.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
