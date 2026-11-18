@@ -23,16 +23,48 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("salon-book");
-const services = database.collection("services");
+const servicesCollection = database.collection("services");
 
 app.get("/", (req, res) => {
   res.send("salon book is open...");
 });
 
 app.get("/services", async (req, res) => {
-  const cursor = services.find({});
-  const result = await cursor.toArray();
-  res.send(result);
+  try {
+    const { search, category, sort } = req.query;
+
+    const query = { status: "active" };
+
+    if (search) {
+      query.serviceName = { $regex: search, $options: "i" };
+    }
+
+    if (category && category !== "all") {
+      query.category = category;
+    }
+
+    let sortOption = {};
+    if (sort === "low-to-high") sortOption = { price: 1 };
+    if (sort === "high-to-low") sortOption = { price: -1 };
+
+    const result = await servicesCollection
+      .find(query)
+      .sort(sortOption)
+      .toArray();
+
+    res.status(200).json({
+      success: true,
+      message: "Services fetched successfully",
+      total: result.length,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Get services error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch services",
+    });
+  }
 });
 
 app.listen(port, () => {
