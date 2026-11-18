@@ -186,6 +186,61 @@ app.get("/admin/services", async (req, res) => {
   }
 });
 
+app.post("/admin/services", async (req, res) => {
+  try {
+    const {
+      serviceName,
+      category,
+      description,
+      price,
+      duration,
+      image,
+      status,
+    } = req.body;
+
+    if (
+      !serviceName ||
+      !category ||
+      !description ||
+      !image ||
+      price == null ||
+      duration == null
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide all required fields",
+      });
+    }
+
+    const newService = {
+      serviceName,
+      category,
+      description,
+      price: Number(price),
+      duration: Number(duration),
+      image,
+      status: status || "active",
+      createdAt: new Date(),
+    };
+
+    const result = await servicesCollection.insertOne(newService);
+
+    res.status(201).json({
+      success: true,
+      message: "Service added successfully",
+      data: {
+        _id: result.insertedId,
+        ...newService,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to add service",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
