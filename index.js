@@ -1289,6 +1289,128 @@ app.get("/customer/overview", async (req, res) => {
   }
 });
 
+app.post("/appointments", async (req, res) => {
+  try {
+    const { customerId, serviceId, appointmentDate, timeSlot, message } =
+      req.body;
+
+    // Required Fields Validation
+    if (!customerId || !serviceId || !appointmentDate || !timeSlot) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide all required information",
+      });
+    }
+
+    // Customer ID Validation
+    if (!ObjectId.isValid(customerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid customer ID",
+      });
+    }
+
+    // Service ID Validation
+    if (!ObjectId.isValid(serviceId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID",
+      });
+    }
+
+    // Date & Time Validation
+    const validationError = validateAppointmentDateTime(
+      appointmentDate,
+      timeSlot,
+    );
+
+    if (validationError) {
+      return res.status(400).json({
+        success: false,
+        message: validationError,
+      });
+    }
+
+    // Check Customer
+    const customer = await usersCollection.findOne({
+      _id: new ObjectId(customerId),
+    });
+
+    if (!customer || customer.role !== "customer") {
+      return res.status(403).json({
+        success: false,
+        message: "Only registered customers can book appointments",
+      });
+    }
+
+    // Check Blocked Customer
+    if (customer.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been blocked",
+      });
+    }
+
+    // Check Active Service
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(serviceId),
+      status: "active",
+    });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not available",
+      });
+    }
+
+    // Atomic Unique Slot Key
+    // এখানে একই সময়ে সব Service-এর জন্য Slot Shared।
+    const activeSlotKey = `${appointmentDate}_${timeSlot}`;
+
+    // Create Appointment
+    const appointment = {
+      customerId,
+      serviceId: service._id,
+      servicePrice: service.price,
+      appointmentDate,
+      timeSlot,
+      message: typeof message === "string" ? message.trim() : "",
+      status: "pending",
+      paymentStatus: "unpaid",
+      activeSlotKey,
+      createdAt: new Date(),
+    };
+
+    const result = await appointmentsCollection.insertOne(appointment);
+
+    return res.status(201).json({
+      success: true,
+      message: "Appointment request submitted successfully",
+      data: {
+        ...appointment,
+        _id: result.insertedId,
+      },
+    });
+  } catch (error) {
+    console.error("Book appointment error:", error);
+
+    // Duplicate Slot Error
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "This time slot is already booked. Please choose another time.",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to submit appointment",
+    });
+  }
+});
+
 const startServer = async () => {
   try {
     await createAppointmentIndexes();
