@@ -1473,6 +1473,71 @@ app.get("/customer/appointments", async (req, res) => {
   }
 });
 
+app.get("/appointments/booked-slots", async (req, res) => {
+  try {
+    const { date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        message: "Date is required",
+      });
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format",
+      });
+    }
+
+    const parsedDate = new Date(`${date}T00:00:00.000Z`);
+
+    if (
+      Number.isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== date
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment date",
+      });
+    }
+
+    const bookedAppointments = await appointmentsCollection
+      .find(
+        {
+          appointmentDate: date,
+          status: {
+            $in: ["pending", "confirmed"],
+          },
+        },
+        {
+          projection: {
+            timeSlot: 1,
+            _id: 0,
+          },
+        },
+      )
+      .toArray();
+
+    const bookedSlots = bookedAppointments.map(
+      (appointment) => appointment.timeSlot,
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: [...new Set(bookedSlots)],
+    });
+  } catch (error) {
+    console.error("Fetch booked slots error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch booked slots",
+    });
+  }
+});
+
 const startServer = async () => {
   try {
     await createAppointmentIndexes();
