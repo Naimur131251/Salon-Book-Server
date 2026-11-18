@@ -691,6 +691,61 @@ app.get("/admin/users/:id", async (req, res) => {
   }
 });
 
+app.patch("/admin/users/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isBlocked } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user ID.",
+      });
+    }
+
+    if (typeof isBlocked !== "boolean") {
+      return res.status(400).json({
+        success: false,
+        message: "isBlocked must be true or false.",
+      });
+    }
+
+    const result = await usersCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        role: "customer",
+      },
+      {
+        $set: {
+          isBlocked,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: isBlocked
+        ? "Customer blocked successfully."
+        : "Customer unblocked successfully.",
+    });
+  } catch (error) {
+    console.error("Block user error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update customer status.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
