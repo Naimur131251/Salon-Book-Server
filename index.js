@@ -417,6 +417,114 @@ app.get("/admin/appointments", async (req, res) => {
   }
 });
 
+app.get("/admin/appointments/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID.",
+      });
+    }
+
+    const result = await appointmentsCollection
+      .aggregate([
+        {
+          $match: {
+            _id: new ObjectId(id),
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            let: { customerId: "$customerId" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: [
+                      "$_id",
+                      {
+                        $convert: {
+                          input: "$$customerId",
+                          to: "objectId",
+                          onError: null,
+                          onNull: null,
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+              {
+                $project: {
+                  name: 1,
+                  email: 1,
+                  image: 1,
+                  phone: 1,
+                },
+              },
+            ],
+            as: "customer",
+          },
+        },
+        {
+          $lookup: {
+            from: "services",
+            localField: "serviceId",
+            foreignField: "_id",
+            as: "service",
+          },
+        },
+        {
+          $unwind: {
+            path: "$customer",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $unwind: {
+            path: "$service",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $addFields: {
+            customerId: "$customer",
+            serviceId: "$service",
+          },
+        },
+        {
+          $project: {
+            customer: 0,
+            service: 0,
+          },
+        },
+      ])
+      .toArray();
+
+    if (!result.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: result[0],
+    });
+  } catch (error) {
+    console.error("Appointment details error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch appointment details.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
