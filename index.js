@@ -1538,6 +1538,51 @@ app.get("/appointments/booked-slots", async (req, res) => {
   }
 });
 
+app.patch("/customer/appointments/:id/cancel", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { customerId } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID",
+      });
+    }
+
+    const result = await appointmentsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        customerId,
+        status: "pending",
+      },
+      {
+        $set: {
+          status: "cancelled",
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found or cannot be cancelled",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Appointment cancelled successfully",
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to cancel appointment",
+    });
+  }
+});
+
 const startServer = async () => {
   try {
     await createAppointmentIndexes();
