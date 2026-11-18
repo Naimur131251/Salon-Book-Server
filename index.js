@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -24,6 +24,7 @@ export async function connectToMongoDB() {
 const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("salon-book");
 const servicesCollection = database.collection("services");
+const appointmentsCollection = database.collection("appointments");
 
 app.get("/", (req, res) => {
   res.send("salon book is open...");
@@ -63,6 +64,43 @@ app.get("/services", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch services",
+    });
+  }
+});
+
+app.get("/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID",
+      });
+    }
+
+    const service = await servicesCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Service details fetched successfully",
+      data: service,
+    });
+  } catch (error) {
+    console.error("Get single service error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch service details",
     });
   }
 });
