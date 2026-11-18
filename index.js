@@ -277,6 +277,56 @@ app.delete("/admin/services/:id", async (req, res) => {
   }
 });
 
+app.patch("/admin/services/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID.",
+      });
+    }
+
+    if (!["active", "inactive"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Status must be active or inactive.",
+      });
+    }
+
+    const result = await servicesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Service ${status} successfully.`,
+    });
+  } catch (error) {
+    console.error("Service status error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update service status.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
