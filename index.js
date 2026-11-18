@@ -525,6 +525,87 @@ app.get("/admin/appointments/:id", async (req, res) => {
   }
 });
 
+app.patch("/admin/appointments/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID.",
+      });
+    }
+
+    if (!["confirmed", "cancelled"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment status.",
+      });
+    }
+
+    const appointment = await appointmentsCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found.",
+      });
+    }
+
+    if (status === "confirmed" && appointment.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Only pending appointments can be confirmed.",
+      });
+    }
+
+    if (
+      status === "cancelled" &&
+      !["pending", "confirmed"].includes(appointment.status)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "This appointment cannot be cancelled.",
+      });
+    }
+
+    const result = await appointmentsCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        status: appointment.status,
+      },
+      {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Appointment was already updated. Please refresh.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Appointment ${status} successfully.`,
+    });
+  } catch (error) {
+    console.error("Appointment status error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update appointment.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
