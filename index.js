@@ -1583,6 +1583,101 @@ app.patch("/customer/appointments/:id/cancel", async (req, res) => {
   }
 });
 
+app.patch("/profile", async (req, res) => {
+  try {
+    const { customerId, name, image, phone } = req.body;
+
+    if (!customerId || !ObjectId.isValid(customerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid customer ID",
+      });
+    }
+
+    const updateData = {};
+
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Name is required",
+        });
+      }
+
+      updateData.name = name.trim();
+    }
+
+    if (image !== undefined) {
+      if (typeof image !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid image URL",
+        });
+      }
+
+      updateData.image = image.trim();
+    }
+
+    if (phone !== undefined) {
+      if (typeof phone !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid phone number",
+        });
+      }
+
+      updateData.phone = phone.trim();
+    }
+
+    if (!Object.keys(updateData).length) {
+      return res.status(400).json({
+        success: false,
+        message: "No information provided",
+      });
+    }
+
+    updateData.updatedAt = new Date();
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(customerId) },
+      { $set: updateData },
+    );
+
+    if (!result.matchedCount) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const updatedUser = await usersCollection.findOne(
+      { _id: new ObjectId(customerId) },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          phone: 1,
+          role: 1,
+        },
+      },
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      data: updatedUser,
+    });
+  } catch (error) {
+    console.error("Profile update error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to update profile",
+    });
+  }
+});
+
 const startServer = async () => {
   try {
     await createAppointmentIndexes();
