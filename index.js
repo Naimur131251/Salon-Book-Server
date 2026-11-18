@@ -241,6 +241,42 @@ app.post("/admin/services", async (req, res) => {
   }
 });
 
+app.delete("/admin/services/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid service ID.",
+      });
+    }
+
+    const result = await servicesCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Service deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete service error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete service.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`salon book is running on port ${port}`);
 });
