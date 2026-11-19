@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -10,6 +11,7 @@ const port = process.env.PORT || 5000;
 app.use(express.json());
 app.use(cors());
 
+//mongodb connection
 const client = new MongoClient(process.env.BETTER_AUTH_DB_URI);
 export async function connectToMongoDB() {
   try {
@@ -28,6 +30,108 @@ const appointmentsCollection = database.collection("appointments");
 const usersCollection = database.collection("user");
 const paymentsCollection = database.collection("payments");
 const transactionsCollection = database.collection("transactions");
+
+// Better Auth URL
+const BETTER_AUTH_URL = process.env.BETTER_AUTH_URL;
+
+if (!BETTER_AUTH_URL) {
+  throw new Error("BETTER_AUTH_URL is missing in backend .env");
+}
+
+// Better Auth JWKS Public Key
+const JWKS = createRemoteJWKSet(new URL(`${BETTER_AUTH_URL}/api/auth/jwks`));
+
+// JWT Verification Middleware
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized access. Token is required.",
+      });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: BETTER_AUTH_URL,
+      audience: BETTER_AUTH_URL,
+    });
+
+    if (!payload.sub) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid token payload.",
+      });
+    }
+
+    const userId = payload.sub;
+
+    const user = await usersCollection.findOne({
+      $or: [
+        ...(ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }] : []),
+        { _id: userId },
+        { id: userId },
+      ],
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "User not found.",
+      });
+    }
+
+    if (user.isBlocked === true) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been blocked.",
+      });
+    }
+
+    req.user = {
+      id: userId,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+    };
+
+    next();
+  } catch (error) {
+    console.error("JWT Verification Error:", error);
+
+    return res.status(401).json({
+      success: false,
+      message: "Invalid or expired token.",
+    });
+  }
+};
+
+// Admin Verification
+const verifyAdmin = (req, res, next) => {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({
+      success: false,
+      message: "Admin access required.",
+    });
+  }
+
+  next();
+};
+
+// Customer Verification
+const verifyCustomer = (req, res, next) => {
+  if (req.user?.role !== "customer") {
+    return res.status(403).json({
+      success: false,
+      message: "Customer access required.",
+    });
+  }
+
+  next();
+};
 
 // Appointment Indexes
 const createAppointmentIndexes = async () => {
@@ -234,7 +338,7 @@ app.get("/services/:id", async (req, res) => {
 });
 
 // Admin Overview
-app.get("/admin/overview", async (req, res) => {
+app.get("/admin/overview", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const [
       totalCustomers,
@@ -292,7 +396,7 @@ app.get("/admin/overview", async (req, res) => {
   }
 });
 
-app.get("/admin/services", async (req, res) => {
+app.get("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await servicesCollection
       .find({})
@@ -312,7 +416,7 @@ app.get("/admin/services", async (req, res) => {
   }
 });
 
-app.post("/admin/services", async (req, res) => {
+app.post("/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const {
       serviceName,
@@ -367,7 +471,7 @@ app.post("/admin/services", async (req, res) => {
   }
 });
 
-app.get("/admin/services/:id", async (req, res) => {
+app.get("/admin/services/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -401,7 +505,7 @@ app.get("/admin/services/:id", async (req, res) => {
   }
 });
 
-app.patch("/admin/services/:id", async (req, res) => {
+app.patch("/admin/services/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -511,93 +615,103 @@ app.patch("/admin/services/:id", async (req, res) => {
   }
 });
 
-app.delete("/admin/services/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
+app.delete(
+  "/admin/services/:id",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid service ID.",
+        });
+      }
+
+      const result = await servicesCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Service deleted successfully.",
+      });
+    } catch (error) {
+      console.error("Delete service error:", error);
+
+      res.status(500).json({
         success: false,
-        message: "Invalid service ID.",
+        message: "Failed to delete service.",
       });
     }
+  },
+);
 
-    const result = await servicesCollection.deleteOne({
-      _id: new ObjectId(id),
-    });
+app.patch(
+  "/admin/services/:id/status",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
 
-    if (result.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found.",
-      });
-    }
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid service ID.",
+        });
+      }
 
-    res.status(200).json({
-      success: true,
-      message: "Service deleted successfully.",
-    });
-  } catch (error) {
-    console.error("Delete service error:", error);
+      if (!["active", "inactive"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Status must be active or inactive.",
+        });
+      }
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete service.",
-    });
-  }
-});
-
-app.patch("/admin/services/:id/status", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid service ID.",
-      });
-    }
-
-    if (!["active", "inactive"].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Status must be active or inactive.",
-      });
-    }
-
-    const result = await servicesCollection.updateOne(
-      { _id: new ObjectId(id) },
-      {
-        $set: {
-          status,
-          updatedAt: new Date(),
+      const result = await servicesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            status,
+            updatedAt: new Date(),
+          },
         },
-      },
-    );
+      );
 
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
+      if (result.matchedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Service ${status} successfully.`,
+      });
+    } catch (error) {
+      console.error("Service status error:", error);
+
+      res.status(500).json({
         success: false,
-        message: "Service not found.",
+        message: "Failed to update service status.",
       });
     }
+  },
+);
 
-    res.status(200).json({
-      success: true,
-      message: `Service ${status} successfully.`,
-    });
-  } catch (error) {
-    console.error("Service status error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to update service status.",
-    });
-  }
-});
-
-app.get("/admin/appointments", async (req, res) => {
+app.get("/admin/appointments", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await appointmentsCollection
       .aggregate([
@@ -692,206 +806,216 @@ app.get("/admin/appointments", async (req, res) => {
   }
 });
 
-app.get("/admin/appointments/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
+app.get(
+  "/admin/appointments/:id",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid appointment ID.",
-      });
-    }
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment ID.",
+        });
+      }
 
-    const result = await appointmentsCollection
-      .aggregate([
-        {
-          $match: {
-            _id: new ObjectId(id),
+      const result = await appointmentsCollection
+        .aggregate([
+          {
+            $match: {
+              _id: new ObjectId(id),
+            },
           },
-        },
-        {
-          $lookup: {
-            from: "user",
-            let: { customerId: "$customerId" },
-            pipeline: [
-              {
-                $match: {
-                  $expr: {
-                    $eq: [
-                      "$_id",
-                      {
-                        $convert: {
-                          input: "$$customerId",
-                          to: "objectId",
-                          onError: null,
-                          onNull: null,
+          {
+            $lookup: {
+              from: "user",
+              let: { customerId: "$customerId" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $eq: [
+                        "$_id",
+                        {
+                          $convert: {
+                            input: "$$customerId",
+                            to: "objectId",
+                            onError: null,
+                            onNull: null,
+                          },
                         },
-                      },
-                    ],
+                      ],
+                    },
                   },
                 },
-              },
-              {
-                $project: {
-                  name: 1,
-                  email: 1,
-                  image: 1,
-                  phone: 1,
+                {
+                  $project: {
+                    name: 1,
+                    email: 1,
+                    image: 1,
+                    phone: 1,
+                  },
                 },
-              },
-            ],
-            as: "customer",
+              ],
+              as: "customer",
+            },
           },
-        },
-        {
-          $lookup: {
-            from: "services",
-            localField: "serviceId",
-            foreignField: "_id",
-            as: "service",
+          {
+            $lookup: {
+              from: "services",
+              localField: "serviceId",
+              foreignField: "_id",
+              as: "service",
+            },
           },
-        },
-        {
-          $unwind: {
-            path: "$customer",
-            preserveNullAndEmptyArrays: true,
+          {
+            $unwind: {
+              path: "$customer",
+              preserveNullAndEmptyArrays: true,
+            },
           },
-        },
-        {
-          $unwind: {
-            path: "$service",
-            preserveNullAndEmptyArrays: true,
+          {
+            $unwind: {
+              path: "$service",
+              preserveNullAndEmptyArrays: true,
+            },
           },
-        },
-        {
-          $addFields: {
-            customerId: "$customer",
-            serviceId: "$service",
+          {
+            $addFields: {
+              customerId: "$customer",
+              serviceId: "$service",
+            },
           },
-        },
-        {
-          $project: {
-            customer: 0,
-            service: 0,
+          {
+            $project: {
+              customer: 0,
+              service: 0,
+            },
           },
-        },
-      ])
-      .toArray();
+        ])
+        .toArray();
 
-    if (!result.length) {
-      return res.status(404).json({
+      if (!result.length) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: result[0],
+      });
+    } catch (error) {
+      console.error("Appointment details error:", error);
+
+      res.status(500).json({
         success: false,
-        message: "Appointment not found.",
+        message: "Failed to fetch appointment details.",
       });
     }
+  },
+);
 
-    res.status(200).json({
-      success: true,
-      data: result[0],
-    });
-  } catch (error) {
-    console.error("Appointment details error:", error);
+app.patch(
+  "/admin/appointments/:id/status",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch appointment details.",
-    });
-  }
-});
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment ID.",
+        });
+      }
 
-app.patch("/admin/appointments/:id/status", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
+      if (!["confirmed", "cancelled"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment status.",
+        });
+      }
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid appointment ID.",
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(id),
       });
-    }
 
-    if (!["confirmed", "cancelled"].includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid appointment status.",
-      });
-    }
+      if (!appointment) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found.",
+        });
+      }
 
-    const appointment = await appointmentsCollection.findOne({
-      _id: new ObjectId(id),
-    });
+      if (status === "confirmed" && appointment.status !== "pending") {
+        return res.status(400).json({
+          success: false,
+          message: "Only pending appointments can be confirmed.",
+        });
+      }
 
-    if (!appointment) {
-      return res.status(404).json({
-        success: false,
-        message: "Appointment not found.",
-      });
-    }
+      if (
+        status === "cancelled" &&
+        !["pending", "confirmed"].includes(appointment.status)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "This appointment cannot be cancelled.",
+        });
+      }
 
-    if (status === "confirmed" && appointment.status !== "pending") {
-      return res.status(400).json({
-        success: false,
-        message: "Only pending appointments can be confirmed.",
-      });
-    }
-
-    if (
-      status === "cancelled" &&
-      !["pending", "confirmed"].includes(appointment.status)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "This appointment cannot be cancelled.",
-      });
-    }
-
-    const updateQuery = {
-      $set: {
-        status,
-        updatedAt: new Date(),
-      },
-    };
-
-    if (status === "cancelled") {
-      updateQuery.$unset = {
-        activeSlotKey: "",
+      const updateQuery = {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
       };
 
-      updateQuery.$set.cancelledAt = new Date();
-    }
+      if (status === "cancelled") {
+        updateQuery.$unset = {
+          activeSlotKey: "",
+        };
 
-    const result = await appointmentsCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-        status: appointment.status,
-      },
-      updateQuery,
-    );
+        updateQuery.$set.cancelledAt = new Date();
+      }
 
-    if (result.modifiedCount === 0) {
-      return res.status(409).json({
+      const result = await appointmentsCollection.updateOne(
+        {
+          _id: new ObjectId(id),
+          status: appointment.status,
+        },
+        updateQuery,
+      );
+
+      if (result.modifiedCount === 0) {
+        return res.status(409).json({
+          success: false,
+          message: "Appointment was already updated. Please refresh.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Appointment ${status} successfully.`,
+      });
+    } catch (error) {
+      console.error("Appointment status error:", error);
+
+      res.status(500).json({
         success: false,
-        message: "Appointment was already updated. Please refresh.",
+        message: "Failed to update appointment.",
       });
     }
+  },
+);
 
-    res.status(200).json({
-      success: true,
-      message: `Appointment ${status} successfully.`,
-    });
-  } catch (error) {
-    console.error("Appointment status error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to update appointment.",
-    });
-  }
-});
-
-app.get("/admin/users", async (req, res) => {
+app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await usersCollection
       .find(
@@ -926,7 +1050,7 @@ app.get("/admin/users", async (req, res) => {
   }
 });
 
-app.get("/admin/users/:id", async (req, res) => {
+app.get("/admin/users/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -976,62 +1100,67 @@ app.get("/admin/users/:id", async (req, res) => {
   }
 });
 
-app.patch("/admin/users/:id/status", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { isBlocked } = req.body;
+app.patch(
+  "/admin/users/:id/status",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { isBlocked } = req.body;
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid user ID.",
-      });
-    }
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid user ID.",
+        });
+      }
 
-    if (typeof isBlocked !== "boolean") {
-      return res.status(400).json({
-        success: false,
-        message: "isBlocked must be true or false.",
-      });
-    }
+      if (typeof isBlocked !== "boolean") {
+        return res.status(400).json({
+          success: false,
+          message: "isBlocked must be true or false.",
+        });
+      }
 
-    const result = await usersCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-        role: "customer",
-      },
-      {
-        $set: {
-          isBlocked,
-          updatedAt: new Date(),
+      const result = await usersCollection.updateOne(
+        {
+          _id: new ObjectId(id),
+          role: "customer",
         },
-      },
-    );
+        {
+          $set: {
+            isBlocked,
+            updatedAt: new Date(),
+          },
+        },
+      );
 
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
+      if (result.matchedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Customer not found.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: isBlocked
+          ? "Customer blocked successfully."
+          : "Customer unblocked successfully.",
+      });
+    } catch (error) {
+      console.error("Block user error:", error);
+
+      res.status(500).json({
         success: false,
-        message: "Customer not found.",
+        message: "Failed to update customer status.",
       });
     }
+  },
+);
 
-    res.status(200).json({
-      success: true,
-      message: isBlocked
-        ? "Customer blocked successfully."
-        : "Customer unblocked successfully.",
-    });
-  } catch (error) {
-    console.error("Block user error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to update customer status.",
-    });
-  }
-});
-
-app.get("/admin/transactions", async (req, res) => {
+app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const result = await transactionsCollection
       .aggregate([
@@ -1148,7 +1277,7 @@ app.get("/admin/transactions", async (req, res) => {
   }
 });
 
-app.patch("/profile", async (req, res) => {
+app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { name, image, phone } = req.body;
 
@@ -1236,22 +1365,14 @@ app.patch("/profile", async (req, res) => {
 });
 
 // Customer Overview
-app.get("/customer/overview", async (req, res) => {
-  try {
-    // Authentication middleware পরে যোগ করবে
-    const customerId = req.query.customerId;
 
-    if (!customerId) {
-      return res.status(400).json({
-        success: false,
-        message: "Customer ID is required",
-      });
-    }
+app.get("/customer/overview", verifyToken, verifyCustomer, async (req, res) => {
+  try {
+    // Get customer ID from JWT
+    const customerId = req.user.id;
 
     const appointments = await appointmentsCollection
-      .find({
-        customerId,
-      })
+      .find({ customerId: customerId.toString() })
       .toArray();
 
     const totalAppointments = appointments.length;
@@ -1272,13 +1393,14 @@ app.get("/customer/overview", async (req, res) => {
       (item) => item.paymentStatus === "paid",
     ).length;
 
+    // Get latest 5 appointments
     const recentAppointments = await appointmentsCollection
-      .find({ customerId })
+      .find({ customerId: customerId.toString() })
       .sort({ createdAt: -1 })
       .limit(5)
       .toArray();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       data: {
         totalAppointments,
@@ -1292,17 +1414,18 @@ app.get("/customer/overview", async (req, res) => {
   } catch (error) {
     console.error("Customer overview error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to load customer overview",
     });
   }
 });
 
-app.post("/appointments", async (req, res) => {
+app.post("/appointments", verifyToken, verifyCustomer, async (req, res) => {
   try {
-    const { customerId, serviceId, appointmentDate, timeSlot, message } =
-      req.body;
+    const { serviceId, appointmentDate, timeSlot, message } = req.body;
+
+    const customerId = req.user.id;
 
     // Required Fields Validation
     if (!customerId || !serviceId || !appointmentDate || !timeSlot) {
@@ -1421,272 +1544,279 @@ app.post("/appointments", async (req, res) => {
   }
 });
 
-app.get("/customer/appointments", async (req, res) => {
-  try {
-    const customerId = req.query.customerId;
+app.get(
+  "/customer/appointments",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      // Get customer ID from verified JWT user
+      const customerId = req.user.id;
 
-    if (!customerId) {
-      return res.status(400).json({
+      const result = await appointmentsCollection
+        .aggregate([
+          {
+            $match: {
+              customerId: customerId.toString(),
+            },
+          },
+          {
+            $lookup: {
+              from: "services",
+              localField: "serviceId",
+              foreignField: "_id",
+              as: "service",
+            },
+          },
+          {
+            $unwind: {
+              path: "$service",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          {
+            $sort: {
+              createdAt: -1,
+            },
+          },
+        ])
+        .toArray();
+
+      return res.status(200).json({
+        success: true,
+        total: result.length,
+        data: result,
+      });
+    } catch (error) {
+      console.error("Customer appointments error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Customer ID is required",
+        message: "Failed to fetch appointments",
       });
     }
+  },
+);
 
-    if (!ObjectId.isValid(customerId)) {
-      return res.status(400).json({
+app.get(
+  "/appointments/booked-slots",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const { date } = req.query;
+
+      if (!date) {
+        return res.status(400).json({
+          success: false,
+          message: "Date is required",
+        });
+      }
+
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid date format",
+        });
+      }
+
+      const parsedDate = new Date(`${date}T00:00:00.000Z`);
+
+      if (
+        Number.isNaN(parsedDate.getTime()) ||
+        parsedDate.toISOString().slice(0, 10) !== date
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment date",
+        });
+      }
+
+      const bookedAppointments = await appointmentsCollection
+        .find(
+          {
+            appointmentDate: date,
+            status: {
+              $in: ["pending", "confirmed"],
+            },
+          },
+          {
+            projection: {
+              timeSlot: 1,
+              _id: 0,
+            },
+          },
+        )
+        .toArray();
+
+      const bookedSlots = bookedAppointments.map(
+        (appointment) => appointment.timeSlot,
+      );
+
+      return res.status(200).json({
+        success: true,
+        data: [...new Set(bookedSlots)],
+      });
+    } catch (error) {
+      console.error("Fetch booked slots error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid customer ID",
+        message: "Failed to fetch booked slots",
       });
     }
+  },
+);
 
-    const result = await appointmentsCollection
-      .aggregate([
+app.patch(
+  "/customer/appointments/:id/cancel",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { customerId } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment ID",
+        });
+      }
+
+      const result = await appointmentsCollection.updateOne(
         {
-          $match: {
-            customerId: customerId.toString(),
-          },
+          _id: new ObjectId(id),
+          customerId,
+          status: "pending",
         },
         {
-          $lookup: {
-            from: "services",
-            localField: "serviceId",
-            foreignField: "_id",
-            as: "service",
+          $set: {
+            status: "cancelled",
+            updatedAt: new Date(),
           },
         },
-        {
-          $unwind: {
-            path: "$service",
-            preserveNullAndEmptyArrays: true,
-          },
-        },
-        {
-          $sort: {
-            createdAt: -1,
-          },
-        },
-      ])
-      .toArray();
+      );
 
-    return res.status(200).json({
-      success: true,
-      total: result.length,
-      data: result,
-    });
-  } catch (error) {
-    console.error("Customer appointments error:", error);
+      if (result.matchedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found or cannot be cancelled",
+        });
+      }
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch appointments",
-    });
-  }
-});
-
-app.get("/appointments/booked-slots", async (req, res) => {
-  try {
-    const { date } = req.query;
-
-    if (!date) {
-      return res.status(400).json({
+      res.status(200).json({
+        success: true,
+        message: "Appointment cancelled successfully",
+      });
+    } catch (error) {
+      res.status(500).json({
         success: false,
-        message: "Date is required",
+        message: "Failed to cancel appointment",
       });
     }
+  },
+);
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid date format",
-      });
-    }
+app.patch(
+  "/customer/profile",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const { customerId, name, image, phone } = req.body;
 
-    const parsedDate = new Date(`${date}T00:00:00.000Z`);
+      if (!customerId || !ObjectId.isValid(customerId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid customer ID",
+        });
+      }
 
-    if (
-      Number.isNaN(parsedDate.getTime()) ||
-      parsedDate.toISOString().slice(0, 10) !== date
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid appointment date",
-      });
-    }
+      const updateData = {};
 
-    const bookedAppointments = await appointmentsCollection
-      .find(
-        {
-          appointmentDate: date,
-          status: {
-            $in: ["pending", "confirmed"],
-          },
-        },
+      if (name !== undefined) {
+        if (typeof name !== "string" || !name.trim()) {
+          return res.status(400).json({
+            success: false,
+            message: "Name is required",
+          });
+        }
+
+        updateData.name = name.trim();
+      }
+
+      if (image !== undefined) {
+        if (typeof image !== "string") {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid image URL",
+          });
+        }
+
+        updateData.image = image.trim();
+      }
+
+      if (phone !== undefined) {
+        if (typeof phone !== "string") {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid phone number",
+          });
+        }
+
+        updateData.phone = phone.trim();
+      }
+
+      if (!Object.keys(updateData).length) {
+        return res.status(400).json({
+          success: false,
+          message: "No information provided",
+        });
+      }
+
+      updateData.updatedAt = new Date();
+
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(customerId) },
+        { $set: updateData },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      const updatedUser = await usersCollection.findOne(
+        { _id: new ObjectId(customerId) },
         {
           projection: {
-            timeSlot: 1,
-            _id: 0,
+            name: 1,
+            email: 1,
+            image: 1,
+            phone: 1,
+            role: 1,
           },
         },
-      )
-      .toArray();
+      );
 
-    const bookedSlots = bookedAppointments.map(
-      (appointment) => appointment.timeSlot,
-    );
+      res.status(200).json({
+        success: true,
+        message: "Profile updated successfully",
+        data: updatedUser,
+      });
+    } catch (error) {
+      console.error("Profile update error:", error);
 
-    return res.status(200).json({
-      success: true,
-      data: [...new Set(bookedSlots)],
-    });
-  } catch (error) {
-    console.error("Fetch booked slots error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch booked slots",
-    });
-  }
-});
-
-app.patch("/customer/appointments/:id/cancel", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { customerId } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
+      res.status(500).json({
         success: false,
-        message: "Invalid appointment ID",
+        message: "Failed to update profile",
       });
     }
-
-    const result = await appointmentsCollection.updateOne(
-      {
-        _id: new ObjectId(id),
-        customerId,
-        status: "pending",
-      },
-      {
-        $set: {
-          status: "cancelled",
-          updatedAt: new Date(),
-        },
-      },
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Appointment not found or cannot be cancelled",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: "Appointment cancelled successfully",
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to cancel appointment",
-    });
-  }
-});
-
-app.patch("/profile", async (req, res) => {
-  try {
-    const { customerId, name, image, phone } = req.body;
-
-    if (!customerId || !ObjectId.isValid(customerId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid customer ID",
-      });
-    }
-
-    const updateData = {};
-
-    if (name !== undefined) {
-      if (typeof name !== "string" || !name.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: "Name is required",
-        });
-      }
-
-      updateData.name = name.trim();
-    }
-
-    if (image !== undefined) {
-      if (typeof image !== "string") {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid image URL",
-        });
-      }
-
-      updateData.image = image.trim();
-    }
-
-    if (phone !== undefined) {
-      if (typeof phone !== "string") {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid phone number",
-        });
-      }
-
-      updateData.phone = phone.trim();
-    }
-
-    if (!Object.keys(updateData).length) {
-      return res.status(400).json({
-        success: false,
-        message: "No information provided",
-      });
-    }
-
-    updateData.updatedAt = new Date();
-
-    const result = await usersCollection.updateOne(
-      { _id: new ObjectId(customerId) },
-      { $set: updateData },
-    );
-
-    if (!result.matchedCount) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    const updatedUser = await usersCollection.findOne(
-      { _id: new ObjectId(customerId) },
-      {
-        projection: {
-          name: 1,
-          email: 1,
-          image: 1,
-          phone: 1,
-          role: 1,
-        },
-      },
-    );
-
-    res.status(200).json({
-      success: true,
-      message: "Profile updated successfully",
-      data: updatedUser,
-    });
-  } catch (error) {
-    console.error("Profile update error:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "Failed to update profile",
-    });
-  }
-});
+  },
+);
 
 const startServer = async () => {
   try {
