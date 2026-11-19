@@ -22,7 +22,7 @@ app.use((req, res, next) => {
 
 //mongodb connection
 const client = new MongoClient(process.env.BETTER_AUTH_DB_URI);
-export async function connectToMongoDB() {
+async function connectToMongoDB() {
   try {
     await client.connect();
     console.log("You successfully connected to MongoDB!");
@@ -45,41 +45,70 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // Better Auth URL
 const BETTER_AUTH_URL = process.env.BETTER_AUTH_URL;
 
-if (!BETTER_AUTH_URL) {
-  throw new Error("BETTER_AUTH_URL is missing in backend .env");
-}
-
 // Better Auth JWKS Public Key
 const JWKS = createRemoteJWKSet(new URL(`${BETTER_AUTH_URL}/api/auth/jwks`));
 
 // JWT Verification Middleware
+
 const verifyToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
 
+    // 1. Check Authorization Header
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      console.log("AUTH ERROR: Bearer token missing");
+
       return res.status(401).json({
         success: false,
-        message: "Unauthorized access. Token is required.",
+        message: "Authorization token missing",
       });
     }
 
     const token = authHeader.split(" ")[1];
 
-    const { payload } = await jwtVerify(token, JWKS, {
-      issuer: BETTER_AUTH_URL,
-      audience: BETTER_AUTH_URL,
-    });
+    if (!token) {
+      console.log("AUTH ERROR: Token is empty");
 
-    if (!payload.sub) {
       return res.status(401).json({
         success: false,
-        message: "Invalid token payload.",
+        message: "Token missing",
       });
     }
 
+    // 2. Verify JWT
+    let payload;
+
+    try {
+      const result = await jwtVerify(token, JWKS, {
+        issuer: BETTER_AUTH_URL,
+        audience: BETTER_AUTH_URL,
+      });
+
+      payload = result.payload;
+    } catch (jwtError) {
+      console.error("JWT ERROR:", jwtError.code, jwtError.message);
+
+      return res.status(401).json({
+        success: false,
+        message: "Invalid or expired token",
+      });
+    }
+
+    // 3. Check User ID
     const userId = payload.sub;
 
+    if (!userId) {
+      console.log("AUTH ERROR: JWT subject missing");
+
+      return res.status(401).json({
+        success: false,
+        message: "Invalid token subject",
+      });
+    }
+
+    console.log("JWT USER ID:", userId);
+
+    // 4. Find User
     const user = await usersCollection.findOne({
       $or: [
         ...(ObjectId.isValid(userId) ? [{ _id: new ObjectId(userId) }] : []),
@@ -89,19 +118,23 @@ const verifyToken = async (req, res, next) => {
     });
 
     if (!user) {
+      console.log("AUTH ERROR: User not found in MongoDB");
+
       return res.status(401).json({
         success: false,
-        message: "User not found.",
+        message: "User not found",
       });
     }
 
+    // 5. Check Blocked User
     if (user.isBlocked === true) {
       return res.status(403).json({
         success: false,
-        message: "Your account has been blocked.",
+        message: "Your account has been blocked",
       });
     }
 
+    // 6. Attach User
     req.user = {
       id: userId,
       name: user.name,
@@ -109,13 +142,15 @@ const verifyToken = async (req, res, next) => {
       role: user.role,
     };
 
+    console.log("AUTH SUCCESS:", user.email, user.role);
+
     next();
   } catch (error) {
-    console.error("JWT Verification Error:", error);
+    console.error("AUTH MIDDLEWARE ERROR:", error);
 
-    return res.status(401).json({
+    return res.status(500).json({
       success: false,
-      message: "Invalid or expired token.",
+      message: "Authentication failed",
     });
   }
 };
@@ -1335,8 +1370,13 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
 
     // ডাটাবেজে থাকা admin ইউজারকে খুঁজে আপডেট করবে
     const result = await usersCollection.updateOne(
-      { role: "admin" },
-      { $set: updateData },
+      {
+        _id: new ObjectId(req.user.id),
+        role: "admin",
+      },
+      {
+        $set: updateData,
+      },
     );
 
     if (result.matchedCount === 0) {
@@ -1347,7 +1387,10 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
     }
 
     const updatedUser = await usersCollection.findOne(
-      { role: "admin" },
+      {
+        _id: new ObjectId(req.user.id),
+        role: "admin",
+      },
       {
         projection: {
           name: 1,
@@ -1727,12 +1770,12 @@ app.patch(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { customerId } = req.body;
+      const customerId = req.user.id;
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({
           success: false,
-          message: "Invalid appointment ID",
+          message: "Invalid appointment ID.",
         });
       }
 
@@ -1741,11 +1784,16 @@ app.patch(
           _id: new ObjectId(id),
           customerId,
           status: "pending",
+          paymentStatus: "unpaid",
         },
         {
           $set: {
             status: "cancelled",
             updatedAt: new Date(),
+            cancelledAt: new Date(),
+          },
+          $unset: {
+            activeSlotKey: "",
           },
         },
       );
@@ -1753,18 +1801,20 @@ app.patch(
       if (result.matchedCount === 0) {
         return res.status(404).json({
           success: false,
-          message: "Appointment not found or cannot be cancelled",
+          message: "Appointment not found or cannot be cancelled.",
         });
       }
 
-      res.status(200).json({
+      return res.status(200).json({
         success: true,
-        message: "Appointment cancelled successfully",
+        message: "Appointment cancelled successfully.",
       });
     } catch (error) {
-      res.status(500).json({
+      console.error("Cancel appointment error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Failed to cancel appointment",
+        message: "Failed to cancel appointment.",
       });
     }
   },
@@ -1776,7 +1826,8 @@ app.patch(
   verifyCustomer,
   async (req, res) => {
     try {
-      const { customerId, name, image, phone } = req.body;
+      const customerId = req.user.id;
+      const { name, image, phone } = req.body;
 
       if (!customerId || !ObjectId.isValid(customerId)) {
         return res.status(400).json({
