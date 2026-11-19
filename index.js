@@ -3,13 +3,22 @@ import cors from "cors";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import Stripe from "stripe";
 
 const app = express();
 const port = process.env.PORT || 5000;
 
 // middleware
-app.use(express.json());
 app.use(cors());
+
+// Stripe webhook-এর জন্য raw body প্রয়োজন
+app.use((req, res, next) => {
+  if (req.originalUrl === "/stripe/webhook") {
+    return next();
+  }
+
+  express.json()(req, res, next);
+});
 
 //mongodb connection
 const client = new MongoClient(process.env.BETTER_AUTH_DB_URI);
@@ -30,6 +39,8 @@ const appointmentsCollection = database.collection("appointments");
 const usersCollection = database.collection("user");
 const paymentsCollection = database.collection("payments");
 const transactionsCollection = database.collection("transactions");
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // Better Auth URL
 const BETTER_AUTH_URL = process.env.BETTER_AUTH_URL;
@@ -1599,6 +1610,47 @@ app.get(
 );
 
 app.get(
+  "/customer/payment-status/:sessionId",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+
+      const appointment = await appointmentsCollection.findOne({
+        stripeSessionId: sessionId,
+        customerId: req.user.id,
+      });
+
+      if (!appointment) {
+        return res.status(404).json({
+          success: false,
+          message: "Payment record not found.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          paymentStatus: appointment.paymentStatus,
+          appointmentDate: appointment.appointmentDate,
+          timeSlot: appointment.timeSlot,
+          servicePrice: appointment.servicePrice,
+          appointmentId: appointment._id,
+        },
+      });
+    } catch (error) {
+      console.error("Payment status error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch payment status.",
+      });
+    }
+  },
+);
+
+app.get(
   "/appointments/booked-slots",
   verifyToken,
   verifyCustomer,
@@ -1818,9 +1870,273 @@ app.patch(
   },
 );
 
+//Stripe
+app.post(
+  "/create-checkout-session",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const { appointmentId } = req.body;
+
+      const customerId = req.user.id;
+
+      if (!ObjectId.isValid(appointmentId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment ID.",
+        });
+      }
+
+      // Find customer's appointment
+      const appointment = await appointmentsCollection.findOne({
+        _id: new ObjectId(appointmentId),
+        customerId,
+      });
+
+      if (!appointment) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found.",
+        });
+      }
+
+      // Only confirmed appointments can be paid
+      if (appointment.status !== "confirmed") {
+        return res.status(400).json({
+          success: false,
+          message: "Only confirmed appointments can be paid.",
+        });
+      }
+
+      // Prevent duplicate payment
+      if (appointment.paymentStatus === "paid") {
+        return res.status(400).json({
+          success: false,
+          message: "This appointment is already paid.",
+        });
+      }
+
+      const amount = Number(appointment.servicePrice);
+
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid appointment amount.",
+        });
+      }
+
+      // Create Stripe Checkout Session (Dynamic payment methods enabled)
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+
+        customer_email: req.user.email,
+
+        line_items: [
+          {
+            price_data: {
+              currency: process.env.STRIPE_CURRENCY || "bdt",
+
+              product_data: {
+                name: "Salon Appointment",
+                description: `Appointment Date: ${appointment.appointmentDate}`,
+              },
+
+              // BDT is a two-decimal currency
+              unit_amount: Math.round(amount * 100),
+            },
+
+            quantity: 1,
+          },
+        ],
+
+        metadata: {
+          appointmentId: appointment._id.toString(),
+          customerId: customerId,
+        },
+
+        success_url: `${process.env.CLIENT_URL}/dashboard/customer/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+
+        cancel_url: `${process.env.CLIENT_URL}/dashboard/payment-cancel`,
+      });
+
+      // Save checkout session reference
+      await appointmentsCollection.updateOne(
+        {
+          _id: appointment._id,
+          paymentStatus: "unpaid",
+        },
+        {
+          $set: {
+            stripeSessionId: session.id,
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "Checkout session created successfully.",
+        url: session.url,
+      });
+    } catch (error) {
+      console.error("Stripe checkout error:", {
+        message: error.message,
+        type: error.type,
+        code: error.code,
+        param: error.param,
+        raw: error.raw,
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Failed to create checkout session.",
+      });
+    }
+  },
+);
+
+app.post(
+  "/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    const signature = req.headers["stripe-signature"];
+
+    let event;
+
+    // Verify Stripe signature
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        signature,
+        process.env.STRIPE_WEBHOOK_SECRET,
+      );
+    } catch (error) {
+      console.error("Webhook signature error:", error.message);
+
+      return res.status(400).send(`Webhook Error: ${error.message}`);
+    }
+
+    try {
+      // Successful Checkout
+      if (event.type === "checkout.session.completed") {
+        const session = event.data.object;
+
+        if (session.payment_status !== "paid") {
+          return res.status(200).json({
+            received: true,
+            message: "Payment is not completed yet.",
+          });
+        }
+
+        const { appointmentId, customerId } = session.metadata || {};
+
+        if (!ObjectId.isValid(appointmentId) || !ObjectId.isValid(customerId)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid payment metadata.",
+          });
+        }
+
+        const appointmentObjectId = new ObjectId(appointmentId);
+
+        // Find the original appointment
+        const appointment = await appointmentsCollection.findOne({
+          _id: appointmentObjectId,
+          customerId,
+          status: "confirmed",
+          paymentStatus: "unpaid",
+          stripeSessionId: session.id,
+        });
+
+        if (!appointment) {
+          // Already processed or invalid appointment
+          const existingTransaction = await transactionsCollection.findOne({
+            stripeSessionId: session.id,
+          });
+
+          if (existingTransaction) {
+            return res.status(200).json({
+              received: true,
+              message: "Payment already processed.",
+            });
+          }
+
+          console.error("Matching appointment not found:", session.id);
+
+          return res.status(200).json({
+            received: true,
+          });
+        }
+
+        // Update appointment payment status
+        const updateResult = await appointmentsCollection.updateOne(
+          {
+            _id: appointmentObjectId,
+            paymentStatus: "unpaid",
+            stripeSessionId: session.id,
+          },
+          {
+            $set: {
+              paymentStatus: "paid",
+              paidAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        if (updateResult.modifiedCount === 0) {
+          return res.status(200).json({
+            received: true,
+          });
+        }
+
+        // Save transaction
+        await transactionsCollection.updateOne(
+          {
+            stripeSessionId: session.id,
+          },
+          {
+            $setOnInsert: {
+              appointmentId: appointmentObjectId,
+              customerId,
+              amount: session.amount_total / 100,
+              currency: session.currency,
+              stripeSessionId: session.id,
+              paymentIntentId: session.payment_intent,
+              status: "succeeded",
+              createdAt: new Date(),
+            },
+          },
+          {
+            upsert: true,
+          },
+        );
+
+        console.log("Payment completed successfully:", session.id);
+      }
+
+      return res.status(200).json({
+        received: true,
+      });
+    } catch (error) {
+      console.error("Webhook processing error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Webhook processing failed.",
+      });
+    }
+  },
+);
+
 const startServer = async () => {
   try {
     await createAppointmentIndexes();
+    await transactionsCollection.createIndex(
+      { stripeSessionId: 1 },
+      { unique: true },
+    );
 
     app.listen(port, () => {
       console.log(`salon book is running on port ${port}`);
