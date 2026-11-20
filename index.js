@@ -37,7 +37,6 @@ const database = connectedClient.db("salon-book");
 const servicesCollection = database.collection("services");
 const appointmentsCollection = database.collection("appointments");
 const usersCollection = database.collection("user");
-const paymentsCollection = database.collection("payments");
 const transactionsCollection = database.collection("transactions");
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -322,7 +321,7 @@ app.get("/services", async (req, res) => {
     } else if (sort === "high-to-low") {
       sortOption = { price: -1 };
     } else {
-      sortOption = { createdAt: -1 };
+      sortOption = { _id: 1 };
     }
 
     let servicesQuery = servicesCollection.find(query).sort(sortOption);
@@ -408,9 +407,9 @@ app.get("/admin/overview", verifyToken, verifyAdmin, async (req, res) => {
         status: "confirmed",
       }),
 
-      paymentsCollection
+      transactionsCollection
         .aggregate([
-          { $match: { status: "succeeded" } },
+          { $match: { status: { $in: ["paid", "succeeded"] } } },
           {
             $group: {
               _id: null,
@@ -1325,7 +1324,15 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
 
 app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const { name, image, phone } = req.body;
+    const adminId = req.user?.id;
+    const { name, image } = req.body || {};
+
+    if (!adminId || !ObjectId.isValid(adminId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid admin ID.",
+      });
+    }
 
     const updateData = {};
 
@@ -1349,16 +1356,6 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
       updateData.image = image.trim();
     }
 
-    if (phone !== undefined) {
-      if (typeof phone !== "string") {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid phone number.",
-        });
-      }
-      updateData.phone = phone.trim();
-    }
-
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
         success: false,
@@ -1368,10 +1365,9 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
 
     updateData.updatedAt = new Date();
 
-    // ডাটাবেজে থাকা admin ইউজারকে খুঁজে আপডেট করবে
     const result = await usersCollection.updateOne(
       {
-        _id: new ObjectId(req.user.id),
+        _id: new ObjectId(adminId),
         role: "admin",
       },
       {
@@ -1388,7 +1384,7 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
 
     const updatedUser = await usersCollection.findOne(
       {
-        _id: new ObjectId(req.user.id),
+        _id: new ObjectId(adminId),
         role: "admin",
       },
       {
@@ -1396,7 +1392,6 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
           name: 1,
           email: 1,
           image: 1,
-          phone: 1,
           role: 1,
           isBlocked: 1,
         },
@@ -1410,7 +1405,6 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Profile update error:", error);
-
     res.status(500).json({
       success: false,
       message: "Failed to update profile.",
@@ -1826,8 +1820,8 @@ app.patch(
   verifyCustomer,
   async (req, res) => {
     try {
-      const customerId = req.user.id;
-      const { name, image, phone } = req.body;
+      const customerId = req.user?.id;
+      const { name, image, phone } = req.body || {};
 
       if (!customerId || !ObjectId.isValid(customerId)) {
         return res.status(400).json({
@@ -1845,7 +1839,6 @@ app.patch(
             message: "Name is required",
           });
         }
-
         updateData.name = name.trim();
       }
 
@@ -1856,7 +1849,6 @@ app.patch(
             message: "Invalid image URL",
           });
         }
-
         updateData.image = image.trim();
       }
 
@@ -1867,8 +1859,14 @@ app.patch(
             message: "Invalid phone number",
           });
         }
-
-        updateData.phone = phone.trim();
+        const trimmedPhone = phone.trim();
+        if (trimmedPhone && !/^01[3-9]\d{8}$/.test(trimmedPhone)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid phone number format",
+          });
+        }
+        updateData.phone = trimmedPhone;
       }
 
       if (!Object.keys(updateData).length) {
@@ -1880,30 +1878,22 @@ app.patch(
 
       updateData.updatedAt = new Date();
 
-      const result = await usersCollection.updateOne(
+      // এক কলেই আপডেট এবং ডাটা রিটার্ন (MongoDB Node Driver v6+)
+      const updatedUser = await usersCollection.findOneAndUpdate(
         { _id: new ObjectId(customerId) },
         { $set: updateData },
+        {
+          returnDocument: "after",
+          projection: { name: 1, email: 1, image: 1, phone: 1, role: 1 },
+        },
       );
 
-      if (!result.matchedCount) {
+      if (!updatedUser) {
         return res.status(404).json({
           success: false,
           message: "User not found",
         });
       }
-
-      const updatedUser = await usersCollection.findOne(
-        { _id: new ObjectId(customerId) },
-        {
-          projection: {
-            name: 1,
-            email: 1,
-            image: 1,
-            phone: 1,
-            role: 1,
-          },
-        },
-      );
 
       res.status(200).json({
         success: true,
@@ -1912,7 +1902,6 @@ app.patch(
       });
     } catch (error) {
       console.error("Profile update error:", error);
-
       res.status(500).json({
         success: false,
         message: "Failed to update profile",
@@ -2006,9 +1995,9 @@ app.post(
           customerId: customerId,
         },
 
-        success_url: `${process.env.CLIENT_URL}/dashboard/customer/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
 
-        cancel_url: `${process.env.CLIENT_URL}/dashboard/payment-cancel`,
+        cancel_url: `${process.env.CLIENT_URL}/payment/cancel?appointment_id=${appointmentId}`,
       });
 
       // Save checkout session reference
@@ -2180,6 +2169,114 @@ app.post(
     }
   },
 );
+
+app.post("/verify-payment", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "Session ID is required",
+      });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status !== "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment is not paid yet",
+      });
+    }
+
+    const { appointmentId, customerId } = session.metadata || {};
+
+    if (!ObjectId.isValid(appointmentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid appointment ID in metadata",
+      });
+    }
+
+    const appointmentObjectId = new ObjectId(appointmentId);
+
+    // ১. অ্যাপয়েন্টমেন্ট, সার্ভিস ও কাস্টমারের তথ্য খুঁজে বের করা
+    const appointment = await appointmentsCollection.findOne({
+      _id: appointmentObjectId,
+    });
+
+    const service = appointment?.serviceId
+      ? await servicesCollection.findOne({
+          _id: new ObjectId(appointment.serviceId),
+        })
+      : null;
+
+    // Better Auth user collection থেকে কাস্টমারের নাম ও ইমেইল নেওয়া
+    const customer = customerId
+      ? await usersCollection.findOne({
+          $or: [
+            { id: customerId },
+            ...(ObjectId.isValid(customerId)
+              ? [{ _id: new ObjectId(customerId) }]
+              : []),
+          ],
+        })
+      : null;
+
+    // ২. অ্যাপয়েন্টমেন্ট আপডেট করা
+    await appointmentsCollection.updateOne(
+      { _id: appointmentObjectId },
+      {
+        $set: {
+          paymentStatus: "paid",
+          stripeSessionId: session.id,
+          paidAt: new Date(),
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    // ৩. ট্রানজ্যাকশন কালেকশনে সম্পূর্ণ তথ্যসহ সেভ করা
+    await transactionsCollection.updateOne(
+      { stripeSessionId: session.id },
+      {
+        $set: {
+          appointmentId: appointmentObjectId,
+          customerId: {
+            _id: customerId,
+            name:
+              customer?.name || session.customer_details?.name || "Customer",
+            email: customer?.email || session.customer_email || "",
+          },
+          service: {
+            serviceName: service?.serviceName || "Salon Service",
+            image: service?.image || "",
+          },
+          appointmentDate: appointment?.appointmentDate || null,
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          stripeSessionId: session.id,
+          paymentIntentId: session.payment_intent,
+          status: "paid",
+          createdAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment verified and saved!",
+    });
+  } catch (error) {
+    console.error("Verify payment error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to verify payment",
+    });
+  }
+});
 
 const startServer = async () => {
   try {
