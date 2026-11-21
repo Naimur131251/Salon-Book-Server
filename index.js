@@ -55,7 +55,7 @@ const verifyToken = async (req, res, next) => {
 
     // 1. Check Authorization Header
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      console.log("AUTH ERROR: Bearer token missing");
+      // console.log("AUTH ERROR: Bearer token missing");
 
       return res.status(401).json({
         success: false,
@@ -97,7 +97,7 @@ const verifyToken = async (req, res, next) => {
     const userId = payload.sub;
 
     if (!userId) {
-      console.log("AUTH ERROR: JWT subject missing");
+      // console.log("AUTH ERROR: JWT subject missing");
 
       return res.status(401).json({
         success: false,
@@ -105,7 +105,7 @@ const verifyToken = async (req, res, next) => {
       });
     }
 
-    console.log("JWT USER ID:", userId);
+    // console.log("JWT USER ID:", userId);
 
     // 4. Find User
     const user = await usersCollection.findOne({
@@ -117,7 +117,7 @@ const verifyToken = async (req, res, next) => {
     });
 
     if (!user) {
-      console.log("AUTH ERROR: User not found in MongoDB");
+      // console.log("AUTH ERROR: User not found in MongoDB");
 
       return res.status(401).json({
         success: false,
@@ -141,7 +141,7 @@ const verifyToken = async (req, res, next) => {
       role: user.role,
     };
 
-    console.log("AUTH SUCCESS:", user.email, user.role);
+    // console.log("AUTH SUCCESS:", user.email, user.role);
 
     next();
   } catch (error) {
@@ -201,7 +201,7 @@ const createAppointmentIndexes = async () => {
     status: 1,
   });
 
-  console.log("Appointment indexes created successfully");
+  // console.log("Appointment indexes created successfully");
 };
 
 const TIME_SLOTS = [
@@ -1910,6 +1910,21 @@ app.patch(
   },
 );
 
+app.get("/customer/profile", verifyToken, verifyCustomer, async (req, res) => {
+  try {
+    const customerId = req.user?.id;
+    const user = await usersCollection.findOne(
+      { _id: new ObjectId(customerId) },
+      { projection: { name: 1, email: 1, image: 1, phone: 1 } },
+    );
+    res.status(200).json({ success: true, data: user });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch profile" });
+  }
+});
+
 //Stripe
 app.post(
   "/create-checkout-session",
@@ -2153,7 +2168,7 @@ app.post(
           },
         );
 
-        console.log("Payment completed successfully:", session.id);
+        // console.log("Payment completed successfully:", session.id);
       }
 
       return res.status(200).json({
