@@ -1219,7 +1219,14 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
                   $expr: {
                     $eq: [
                       { $toString: "$_id" },
-                      { $toString: "$$appointmentId" },
+                      {
+                        $convert: {
+                          input: "$$appointmentId",
+                          to: "string",
+                          onError: "",
+                          onNull: "",
+                        },
+                      },
                     ],
                   },
                 },
@@ -1234,7 +1241,14 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
                         $expr: {
                           $eq: [
                             { $toString: "$_id" },
-                            { $toString: "$$serviceId" },
+                            {
+                              $convert: {
+                                input: "$$serviceId",
+                                to: "string",
+                                onError: "",
+                                onNull: "",
+                              },
+                            },
                           ],
                         },
                       },
@@ -1270,13 +1284,23 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
         },
         {
           $lookup: {
-            from: "user",
+            from: "user", // আপনার ডাটাবেসে কালেকশনের নাম "users" হলে এটি পরিবর্তন করে "users" দিন
             let: { customerId: "$customerId" },
             pipeline: [
               {
                 $match: {
                   $expr: {
-                    $eq: [{ $toString: "$_id" }, { $toString: "$$customerId" }],
+                    $eq: [
+                      { $toString: "$_id" },
+                      {
+                        $convert: {
+                          input: "$$customerId",
+                          to: "string",
+                          onError: "",
+                          onNull: "",
+                        },
+                      },
+                    ],
                   },
                 },
               },
@@ -1318,6 +1342,7 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch transactions.",
+      error: error.message, // ডিবাগিংয়ের জন্য এটি সাময়িকভাবে যোগ করতে পারেন
     });
   }
 });
@@ -1325,7 +1350,7 @@ app.get("/admin/transactions", verifyToken, verifyAdmin, async (req, res) => {
 app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const adminId = req.user?.id;
-    const { name, image } = req.body || {};
+    const { name, image, phone } = req.body || {};
 
     if (!adminId || !ObjectId.isValid(adminId)) {
       return res.status(400).json({
@@ -1336,6 +1361,7 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
 
     const updateData = {};
 
+    // Name validation
     if (name !== undefined) {
       if (typeof name !== "string" || !name.trim()) {
         return res.status(400).json({
@@ -1346,6 +1372,7 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
       updateData.name = name.trim();
     }
 
+    // Image validation
     if (image !== undefined) {
       if (typeof image !== "string") {
         return res.status(400).json({
@@ -1354,6 +1381,24 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
         });
       }
       updateData.image = image.trim();
+    }
+
+    // Phone validation (বাংলাদেশি নম্বর ফরম্যাট)
+    if (phone !== undefined) {
+      if (typeof phone !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid phone number.",
+        });
+      }
+      const trimmedPhone = phone.trim();
+      if (trimmedPhone && !/^01[3-9]\d{8}$/.test(trimmedPhone)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid phone number format.",
+        });
+      }
+      updateData.phone = trimmedPhone;
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -1365,7 +1410,8 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
 
     updateData.updatedAt = new Date();
 
-    const result = await usersCollection.updateOne(
+    // এক কলেই আপডেট এবং আপডেটেড ডাটা রিটার্ন
+    const updatedUser = await usersCollection.findOneAndUpdate(
       {
         _id: new ObjectId(adminId),
         role: "admin",
@@ -1373,30 +1419,25 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
       {
         $set: updateData,
       },
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Admin user not found.",
-      });
-    }
-
-    const updatedUser = await usersCollection.findOne(
       {
-        _id: new ObjectId(adminId),
-        role: "admin",
-      },
-      {
+        returnDocument: "after",
         projection: {
           name: 1,
           email: 1,
           image: 1,
+          phone: 1, // প্রোজেকশনে phone যোগ করা হয়েছে
           role: 1,
           isBlocked: 1,
         },
       },
     );
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin user not found.",
+      });
+    }
 
     res.status(200).json({
       success: true,
@@ -1408,6 +1449,54 @@ app.patch("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to update profile.",
+    });
+  }
+});
+
+app.get("/admin/profile", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const adminId = req.user?.id;
+
+    if (!adminId || !ObjectId.isValid(adminId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid admin ID.",
+      });
+    }
+
+    const admin = await usersCollection.findOne(
+      {
+        _id: new ObjectId(adminId),
+        role: "admin",
+      },
+      {
+        projection: {
+          name: 1,
+          email: 1,
+          image: 1,
+          phone: 1,
+          role: 1,
+          isBlocked: 1,
+        },
+      },
+    );
+
+    if (!admin) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin user not found.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: admin,
+    });
+  } catch (error) {
+    console.error("Get admin profile error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch admin profile.",
     });
   }
 });
